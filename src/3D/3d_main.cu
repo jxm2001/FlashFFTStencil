@@ -41,9 +41,10 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    const int INPUT_WIDTH = 768;
+    // const int INPUT_WIDTH = 768;
     const int KERNEL_WIDTH = 3;
     std::string kernel_shape = argv[1];
+    const int INPUT_WIDTH = std::stoi(argv[2]);
     const int time = std::stoi(argv[3]);
     const bool is_print_data = false;
 
@@ -137,28 +138,19 @@ int main(int argc, char *argv[])
 
     checkCudaErrors(cudaMemcpy(d_input, h_input_gpu, mem_size_input_gpu, cudaMemcpyHostToDevice));
 
+	// Warm-up run used solely for performance evaluation; output correctness is not ensured.
     cudaEvent_t start, stop;
-    float elapsedTime = 0.0;
     checkCudaErrors(cudaEventCreate(&start));
     checkCudaErrors(cudaEventCreate(&stop));
-
     checkCudaErrors(cudaEventRecord(start, 0));
-
-    for (int i= 0; i < time; i++)
-    {
-
-
     rfft_3d_8_nwarp<nwarp_in_block><<<
         {block_num_x, block_num_y, block_num_z},
         // {1, 1, 1},
-
         nwarp_in_block * WARP_SIZE * n_unit,
-
         (nwarp_in_block * 2 * shared_size) * sizeof(double)
         // (nwarp_in_block * 2 * rfft_size) * sizeof(double)
         
         >>>(
-
         d_input,
         ACTUAL_WIDTH,
         INPUT_WIDTH,
@@ -166,15 +158,63 @@ int main(int argc, char *argv[])
         OVERLAP_WIDTH,
         // fft_allnum - 1,
         d_output);
-
-    }
-
     checkCudaErrors(cudaEventRecord(stop, 0));
     checkCudaErrors(cudaEventSynchronize(stop));
-
-    // compute time
+    float single_run_time = 0;
+    checkCudaErrors(cudaEventElapsedTime(&single_run_time, start, stop));
+    const float target_warmup_time = 5000.0f;
+    int estimated_iterations = 0;
+    if(single_run_time > 0) {
+        estimated_iterations = static_cast<int>(target_warmup_time / single_run_time);
+    }
+    int warmup_iterations = std::max(50, estimated_iterations);
+    printf("Warmup iterations: %d (estimated for ~5s)\n", warmup_iterations);
+    for(int warmup_iter = 0; warmup_iter < warmup_iterations; warmup_iter++){
+        rfft_3d_8_nwarp<nwarp_in_block><<<
+            {block_num_x, block_num_y, block_num_z},
+            // {1, 1, 1},
+            nwarp_in_block * WARP_SIZE * n_unit,
+            (nwarp_in_block * 2 * shared_size) * sizeof(double)
+            // (nwarp_in_block * 2 * rfft_size) * sizeof(double)
+            
+            >>>(
+            d_input,
+            ACTUAL_WIDTH,
+            INPUT_WIDTH,
+            sub_input_width,
+            OVERLAP_WIDTH,
+            // fft_allnum - 1,
+            d_output);
+        cudaDeviceSynchronize();
+    }
+    float elapsedTime = 0.0;
+    checkCudaErrors(cudaEventRecord(start, 0));
+    for (int i= 0; i < time; i++)
+    {
+        rfft_3d_8_nwarp<nwarp_in_block><<<
+            {block_num_x, block_num_y, block_num_z},
+            // {1, 1, 1},
+            nwarp_in_block * WARP_SIZE * n_unit,
+            (nwarp_in_block * 2 * shared_size) * sizeof(double)
+            // (nwarp_in_block * 2 * rfft_size) * sizeof(double)
+            
+            >>>(
+            d_input,
+            ACTUAL_WIDTH,
+            INPUT_WIDTH,
+            sub_input_width,
+            OVERLAP_WIDTH,
+            // fft_allnum - 1,
+            d_output);
+    }
+    checkCudaErrors(cudaEventRecord(stop, 0));
+    checkCudaErrors(cudaEventSynchronize(stop));
     checkCudaErrors(cudaEventElapsedTime(&elapsedTime, start, stop));
     std::cout << "Time = " << elapsedTime << "[ms]" << std::endl;
+    double secs = elapsedTime / 1000.0;
+    printf("GStencil/s = %f\n", (1.0 * INPUT_WIDTH * INPUT_WIDTH * INPUT_WIDTH * time) / secs / 1e9);
+    checkCudaErrors(cudaEventDestroy(start));
+    checkCudaErrors(cudaEventDestroy(stop));
 
     cudaMemcpy(h_output, d_output, mem_size_output, cudaMemcpyDeviceToHost);
 
